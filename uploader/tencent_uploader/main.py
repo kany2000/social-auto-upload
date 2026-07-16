@@ -111,8 +111,8 @@ async def cookie_auth(account_file):
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto(TENCENT_UPLOAD_URL)
-            await page.wait_for_url(TENCENT_UPLOAD_URL, timeout=5000)
+            await page.goto(TENCENT_UPLOAD_URL, wait_until="load")
+            await page.wait_for_load_state("load", timeout=30000)
 
             login_markers = [
                 page.get_by_text("扫码登录", exact=True).first,
@@ -311,7 +311,7 @@ async def _wait_for_tencent_login(
     poll_interval: int = 3,
     max_checks: int = 100,
 ) -> dict:
-    qrcode_path = Path(qrcode_info["image_path"])
+    qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
     scanned_logged = False
     for _ in range(max_checks):
         if await _is_tencent_login_completed(page):
@@ -322,17 +322,22 @@ async def _wait_for_tencent_login(
             tencent_logger.info(_msg("📱", "已经扫码啦，还差手机端确认一下"))
             scanned_logged = True
 
-        if await _is_tencent_qrcode_expired(page):
+        if await _is_tencent_qrcode_expired(page) and qrcode_path:
             tencent_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
             await _refresh_tencent_qrcode(page)
             await asyncio.sleep(1)
-            qrcode_info = await _save_tencent_qrcode(
-                page,
-                account_file,
-                previous_qrcode_path=qrcode_path,
-                qrcode_callback=qrcode_callback,
-            )
-            qrcode_path = Path(qrcode_info["image_path"])
+            try:
+                qrcode_info = await _save_tencent_qrcode(
+                    page,
+                    account_file,
+                    previous_qrcode_path=qrcode_path,
+                    qrcode_callback=qrcode_callback,
+                )
+                qrcode_path = Path(qrcode_info["image_path"])
+            except Exception:
+                qrcode_path = None
+                qrcode_info = {}
+                tencent_logger.warning(_msg("😵", "刷新后仍无法提取二维码，请在浏览器中直接扫码"))
 
         await asyncio.sleep(poll_interval)
 
@@ -357,9 +362,19 @@ async def tencent_cookie_gen(
         try:
             page = await context.new_page()
             await page.goto(TENCENT_LOGIN_URL)
-            qrcode_info = await _save_tencent_qrcode(page, account_file, qrcode_callback=qrcode_callback)
-            qrcode_path = Path(qrcode_info["image_path"])
-            tencent_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+            try:
+                qrcode_info = await _save_tencent_qrcode(
+                    page, account_file, qrcode_callback=qrcode_callback
+                )
+                qrcode_path = Path(qrcode_info["image_path"])
+                tencent_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+            except Exception as qr_e:
+                qrcode_path = None
+                qrcode_info = {}
+                tencent_logger.warning(
+                    _msg("😵", f"二维码提取失败（{qr_e}），请在浏览器中直接扫码")
+                )
+                tencent_logger.info(_msg("🧍", "请扫码，二维码已在浏览器中显示"))
             result = await _wait_for_tencent_login(
                 page,
                 account_file,
@@ -392,7 +407,7 @@ async def tencent_cookie_gen(
             return result
         finally:
             qrcode_utils = _get_qrcode_utils()
-            if qrcode_utils["remove_qrcode_file"](qrcode_path):
+            if qrcode_path and qrcode_utils["remove_qrcode_file"](qrcode_path):
                 tencent_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 tencent_logger.error(_msg("😢", f"登录失败: {result['message']}"))
@@ -518,7 +533,7 @@ class TencentBaseUploader(BaseVideoUploader):
         fi = await find_file_input()
         if fi is None:
             # 助手落在首页：先点「发表视频」唤出编辑器与上传控件
-            publish_btn = page.get_by_text("发表视频").first
+            publish_btn = page.get_by_role("button", name="发表视频").first
             if await publish_btn.count():
                 await publish_btn.click()
                 await asyncio.sleep(3)

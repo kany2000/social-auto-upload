@@ -142,6 +142,14 @@ async def _save_douyin_qrcode(page: Page, account_file: str, previous_qrcode_pat
         "image_path": str(qrcode_path),
         "image_data_url": qrcode_src,
     }
+    # 创建/更新固定链接指向最新二维码
+    latest_link = qrcode_path.parent / f"douyin_{Path(account_file).stem}_latest_qrcode.png"
+    try:
+        if latest_link.exists() or latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(qrcode_path.name)
+    except Exception:
+        pass
     await _emit_qrcode_callback(qrcode_callback, qrcode_info)
     return qrcode_info
 
@@ -172,7 +180,9 @@ async def _is_douyin_login_completed(page: Page) -> bool:
 
 async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, poll_interval: int = 3, max_checks: int = 100) -> dict:
     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
-    for _ in range(max_checks):
+    original_url = page.url
+    saw_2fa = False
+    for i in range(max_checks):
         if await _is_douyin_login_completed(page):
             douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
             return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
@@ -194,6 +204,19 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
             await asyncio.sleep(1)
             qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
             qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+
+        # 主动每 30 秒刷新一次二维码，防止过期
+        if i > 0 and i % 10 == 0:  # poll_interval=3s, 10*3=30s
+            try:
+                refresh_btn = page.get_by_text("刷新", exact=True).first
+                if await refresh_btn.count() and await refresh_btn.is_visible():
+                    await refresh_btn.click()
+                    await asyncio.sleep(1)
+                    qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
+                    qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+                    douyin_logger.info(_msg("🔄", "主动刷新二维码"))
+            except Exception:
+                pass
 
         await asyncio.sleep(poll_interval)
 
@@ -223,7 +246,7 @@ async def douyin_cookie_gen(
         try:
             page = await context.new_page()
             await page.goto("https://creator.douyin.com/")
-            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
             qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
             douyin_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
             result = await _wait_for_douyin_login(
